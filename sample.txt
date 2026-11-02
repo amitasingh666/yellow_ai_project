@@ -1,0 +1,9 @@
+booking: id, name, phone, status, slot_id
+
+slots: `slot_id`, `center_id`, `vaccine_type`, `capacity`, `starts_at`, `status` (`OPEN` or `CLOSED`), {patient_id}.
+
+api/booking --->POST {patient_id, slot_id}
+api/cancellation --->DELETE {booking_id}
+api/reschedule  ---->POST {patient_id, slot_id}
+api/slots ---->GET {slot_id}
+api/patient ----->GET {patient_id}
