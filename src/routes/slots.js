@@ -1,45 +1,79 @@
 const express = require('express');
 const { query } = require('../../db');
+const { AppError } = require('../errors');
+const { parsePositiveInt } = require('../validation');
 
 const router = express.Router();
 
-const isPositiveInt = (value) => Number.isInteger(Number(value)) && Number(value) > 0;
+const SLOT_COLUMNS = `slot_id, center_id, vaccine_type, capacity, booked_count,
+                      capacity - booked_count AS remaining, starts_at, status`;
 
-// GET /api/slots/:slot_id  (or /api/slots?slot_id=)  -> details of that slot if it has capacity
-// GET /api/slots                                     -> number of slots that still have capacity
-router.get(['/slots', '/slots/:slot_id'], async (req, res) => {
-  const slotId = req.params.slot_id ?? req.query.slot_id;
+// POST /slots  { center_id, vaccine_type, capacity, starts_at, status? }
+router.post('/slots', async (req, res) => {
+  const body = req.body || {};
+  const centerId = parsePositiveInt(body.center_id, 'center_id');
+  const capacity = parsePositiveInt(body.capacity, 'capacity');
 
-  try {
-    if (slotId === undefined) {
-      const result = await query('SELECT COUNT(*)::int AS count FROM slots WHERE capacity > 0');
-      return res.status(200).json(result.rows[0].count);
-    }
-
-    if (!isPositiveInt(slotId)) {
-      return res.status(400).json({ error: 'slot_id must be a positive integer' });
-    }
-
-    const result = await query(
-      `SELECT slot_id, center_id, capacity AS capacity_remaining, vaccine_type, status
-         FROM slots
-        WHERE slot_id = $1`,
-      [slotId]
-    );
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: 'Slot not found' });
-    }
-
-    const slot = result.rows[0];
-    if (slot.capacity_remaining <= 0) {
-      return res.status(409).json({ error: 'No capacity available for this slot' });
-    }
-
-    return res.status(200).json(slot);
-  } catch (error) {
-    console.error('Fetching slots failed:', error);
-    return res.status(500).json({ error: 'Internal server error' });
+  const vaccineType = typeof body.vaccine_type === 'string' ? body.vaccine_type.trim() : '';
+  if (!vaccineType || vaccineType.length > 50) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'vaccine_type must be a non-empty string (max 50 chars)');
   }
+
+  const startsAt = new Date(body.starts_at);
+  if (typeof body.starts_at !== 'string' || Number.isNaN(startsAt.getTime())) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'starts_at must be an ISO-8601 timestamp');
+  }
+
+  const status = body.status ?? 'OPEN';
+  if (!['OPEN', 'CLOSED'].includes(status)) {
+    throw new AppError(400, 'VALIDATION_ERROR', "status must be 'OPEN' or 'CLOSED'");
+  }
+
+  const { rows } = await query(
+    `INSERT INTO slots (center_id, vaccine_type, capacity, starts_at, status)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING ${SLOT_COLUMNS}`,
+    [centerId, vaccineType, capacity, startsAt.toISOString(), status]
+  );
+  res.status(201).json(rows[0]);
+});
+
+// GET /slots -> all slots with live counts
+router.get('/slots', async (req, res) => {
+  const { rows } = await query(`SELECT ${SLOT_COLUMNS} FROM slots ORDER BY starts_at, slot_id`);
+  res.json(rows);
+});
+
+// GET /slots/:slot_id -> { booked_count, remaining, capacity, ... }
+// booked_count is updated in the same transaction as the appointment row,
+// so this read is always exact, never "eventually" correct.
+router.get('/slots/:slot_id', async (req, res) => {
+  const slotId = parsePositiveInt(req.params.slot_id, 'slot_id');
+  const { rows } = await query(`SELECT ${SLOT_COLUMNS} FROM slots WHERE slot_id = $1`, [slotId]);
+  if (rows.length === 0) {
+    throw new AppError(404, 'SLOT_NOT_FOUND', `Slot ${slotId} does not exist`);
+  }
+  res.json(rows[0]);
+});
+
+// PATCH /slots/:slot_id  { status: 'OPEN' | 'CLOSED' }
+// Lets a center close a slot (e.g. staff shortage). The UPDATE needs the slot's
+// row lock, so it waits for any booking currently holding it - a booking is
+// either fully before the close or sees CLOSED, never in between.
+router.patch('/slots/:slot_id', async (req, res) => {
+  const slotId = parsePositiveInt(req.params.slot_id, 'slot_id');
+  const status = req.body?.status;
+  if (!['OPEN', 'CLOSED'].includes(status)) {
+    throw new AppError(400, 'VALIDATION_ERROR', "status must be 'OPEN' or 'CLOSED'");
+  }
+  const { rows } = await query(`UPDATE slots SET status = $2 WHERE slot_id = $1 RETURNING ${SLOT_COLUMNS}`, [
+    slotId,
+    status,
+  ]);
+  if (rows.length === 0) {
+    throw new AppError(404, 'SLOT_NOT_FOUND', `Slot ${slotId} does not exist`);
+  }
+  res.json(rows[0]);
 });
 
 module.exports = router;

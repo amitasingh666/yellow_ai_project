@@ -1,15 +1,17 @@
 {
   "name": "yellow_ai_project",
   "version": "1.0.0",
-  "description": "",
+  "description": "Vaccine appointment scheduling service: concurrency-safe booking on PostgreSQL",
   "main": "server.js",
   "scripts": {
-    "seed": "node seed.js",
     "start": "node server.js",
     "dev": "node --watch server.js",
+    "test": "node --test --test-concurrency=1 test/",
+    "seed": "node seed.js",
     "db:start": "docker start clinic-db",
     "db:stop": "docker stop clinic-db",
-    "db:init": "node -e \"const db=require('./db');db.initDb().finally(()=>db.pool.end())\"",
+    "db:init": "node -e \"const db=require('./db');db.initDb().then(()=>console.log('Schema ready')).finally(()=>db.pool.end())\"",
+    "db:reset": "node -e \"const db=require('./db');db.resetDb().then(()=>console.log('Database reset')).finally(()=>db.pool.end())\"",
     "db:shell": "docker exec -it clinic-db psql -U postgres -d clinic"
   },
   "repository": {
